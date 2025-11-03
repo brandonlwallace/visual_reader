@@ -1,0 +1,7 @@
+streamlit
+pymupdf
+diffusers
+torch
+transformers
+requests
+Pillow
