@@ -29,7 +29,6 @@ CACHE_DIR = Path("image_cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
 @st.cache_resource
-@st.cache_resource
 def load_pipeline():
     """Load the diffusers Stable Diffusion pipeline (only used when SD_MODE == 'diffusers')."""
     st.info("Loading Stable Diffusion model... (first time only)")
@@ -126,6 +125,43 @@ def generate_image(prompt_text):
 # --- UI ---
 st.set_page_config(page_title="Visual Reader AI", layout="wide")
 st.title("📚 Brandon's Reading Buddy for Visual Learners: generate visuals for your favorite pdf.")
+
+# Sidebar configuration (overrides environment variables at runtime)
+with st.sidebar.expander("Configuration", expanded=True):
+    sd_mode_choice = st.selectbox("Stable Diffusion mode", options=["diffusers", "api"], index=0 if SD_MODE == "diffusers" else 1)
+    sd_api_input = st.text_input("SD API URL", value=SD_API_URL)
+    model_name_input = st.text_input("Diffusers model name", value=MODEL_NAME)
+    ollama_cli_input = st.text_input("Ollama CLI path", value=OLLAMA_CLI)
+    ollama_model_input = st.text_input("Ollama model name", value=OLLAMA_MODEL)
+
+# apply sidebar overrides
+SD_MODE = sd_mode_choice
+SD_API_URL = sd_api_input.strip() or SD_API_URL
+MODEL_NAME = model_name_input.strip() or MODEL_NAME
+OLLAMA_CLI = ollama_cli_input.strip() or OLLAMA_CLI
+OLLAMA_MODEL = ollama_model_input.strip() or OLLAMA_MODEL
+
+# Quick Ollama tests: list installed models and run a small rewrite (useful to verify phi3 is available)
+with st.sidebar.expander("Ollama debug / test", expanded=False):
+    if st.button("List Ollama models"):
+        try:
+            if not shutil.which(OLLAMA_CLI):
+                st.error(f"'{OLLAMA_CLI}' not found in PATH. Set OLLAMA_CLI to the full path to the ollama executable.")
+            else:
+                proc = subprocess.run([OLLAMA_CLI, "list"], capture_output=True, text=True, timeout=10)
+                if proc.returncode == 0:
+                    st.code(proc.stdout)
+                else:
+                    st.error(f"Ollama list failed: {proc.stderr}")
+        except Exception as e:
+            st.error(f"Error running ollama list: {e}")
+
+    sample_text = st.text_area("Sample text to rewrite (test)", "A lush forest canopy bathed in sunlight, arrows indicating photosynthesis.")
+    if st.button("Run Ollama rewrite"):
+        with st.spinner("Running Ollama..."):
+            result = rewrite_prompt_with_ollama(sample_text)
+            st.write("**Rewrite result:**")
+            st.info(result)
 
 uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
