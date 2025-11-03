@@ -14,4 +14,4 @@ The resulting image appears right below the text.
 
 This application runs entirely offline and at no cost. 
 
-![image](https://github.com/brandonlwallace/visual_reader/visual_reader_preview_UI.png) 
+![image](https://github.com/brandonlwallace/visual_reader/blob/main/visual_reader_preview_UI.png)
