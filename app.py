@@ -12,6 +12,9 @@ import fitz  # PyMuPDF
 from diffusers import StableDiffusionPipeline
 import torch
 import hashlib
+from pathlib import PureWindowsPath
+from typing import Optional, Tuple
+import glob
 
 # --- CONFIG ---
 # Choose between using diffusers locally or a local Stable Diffusion HTTP API (e.g. AUTOMATIC1111 or sd-webui)
@@ -52,12 +55,13 @@ def rewrite_prompt_with_ollama(text):
     base_prompt = f"Rewrite the following passage into a short, vivid, detailed visual art description suitable for an AI image generator:\n\n{text}"
     try:
         # Ensure the Ollama CLI is available
-        if not shutil.which(OLLAMA_CLI):
-            raise FileNotFoundError(f"'{OLLAMA_CLI}' not found in PATH")
+        cli = detect_ollama_cli(OLLAMA_CLI)
+        if not cli:
+            raise FileNotFoundError(f"'{OLLAMA_CLI}' not found in PATH or common locations")
 
         # Send the prompt on stdin to avoid shell length issues
         proc = subprocess.run(
-            [OLLAMA_CLI, "run", OLLAMA_MODEL],
+            [cli, "run", OLLAMA_MODEL],
             input=base_prompt,
             capture_output=True,
             text=True,
@@ -69,8 +73,102 @@ def rewrite_prompt_with_ollama(text):
         refined = proc.stdout.strip()
         return refined if refined else text
     except Exception as e:
-        st.warning(f"⚠️ Ollama not available or failed: {e}. Using raw text instead.")
-        return text
+        st.warning(f"⚠️ Ollama not available or failed: {e}. Using fallback rewriter instead.")
+        return fallback_rewrite(text)
+
+
+def fallback_rewrite(text: str) -> str:
+    """A deterministic, local prompt rewriter to use when Ollama isn't available.
+
+    This produces a concise, vivid prompt suitable for SD and is better than raw text.
+    """
+    # Keep it short and focused: scene + style hints + key objects + mood
+    snippet = text.strip().replace('\n', ' ')
+    if len(snippet) > 200:
+        snippet = snippet[:200].rsplit(' ', 1)[0] + '...'
+    template = (
+        f"A vivid, cinematic illustration of: {snippet}. "
+        "High detail, vibrant colors, dramatic lighting, clear composition, arrows or labels if relevant."
+    )
+    return template
+
+
+def detect_ollama_cli(override: Optional[str] = None) -> Optional[str]:
+    """Try to locate an `ollama` executable.
+
+    Order of checks:
+    - If override is provided and exists, return it
+    - shutil.which(override) (or default name)
+    - common Windows install paths
+    - search under user's ~/.ollama for an ollama.exe
+    """
+    # 1) explicit override path
+    if override:
+        if os.path.isfile(override):
+            return override
+
+        # maybe user passed a bare name; try which
+        which_path = shutil.which(override)
+        if which_path:
+            return which_path
+
+    # 2) find in PATH using default binary name
+    which_default = shutil.which(OLLAMA_CLI)
+    if which_default:
+        return which_default
+
+    # 3) common locations on Windows
+    candidates = [
+        str(Path.home() / '.ollama' / 'ollama.exe'),
+        str(Path.home() / '.ollama' / 'bin' / 'ollama.exe'),
+        str(Path.home() / 'AppData' / 'Local' / 'Programs' / 'Ollama' / 'ollama.exe'),
+        r"C:\Program Files\Ollama\ollama.exe",
+        r"C:\Program Files (x86)\Ollama\ollama.exe",
+    ]
+    # Show paths being checked in debug mode
+    if st._is_running:
+        st.sidebar.write("**Debug: checking paths**")
+        for c in candidates:
+            exists = os.path.exists(c)
+            st.sidebar.text(f"{'✓' if exists else '✗'} {c}")
+
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
+    # 4) try a limited rglob search under ~/.ollama (safe small tree)
+    try:
+        home_ollama = Path.home() / '.ollama'
+        if home_ollama.exists() and home_ollama.is_dir():
+            matches = list(home_ollama.rglob('ollama.exe'))
+            if matches:
+                return str(matches[0])
+    except Exception:
+        pass
+
+    return None
+
+
+@st.cache_data(ttl=300)
+def check_ollama_status(cli_override: Optional[str], model_name: str) -> Tuple[Optional[str], bool, str]:
+    """Return (cli_path or None, model_found_bool, message).
+
+    Caches results for a short time to avoid repeated subprocess calls during UI re-renders.
+    """
+    cli = detect_ollama_cli(cli_override)
+    if not cli:
+        return None, False, "Ollama CLI not found"
+
+    try:
+        proc = subprocess.run([cli, 'list'], capture_output=True, text=True, timeout=8)
+        if proc.returncode != 0:
+            return cli, False, f"Ollama list failed: {proc.stderr.strip()}"
+        out = proc.stdout.lower()
+        found = model_name.lower() in out
+        msg = "model found" if found else "model not installed"
+        return cli, found, msg
+    except Exception as e:
+        return cli, False, f"Error checking ollama: {e}"
 
 def get_cache_filename(prompt_text):
     """Generate a unique hash filename for each prompt."""
@@ -162,6 +260,32 @@ with st.sidebar.expander("Ollama debug / test", expanded=False):
             result = rewrite_prompt_with_ollama(sample_text)
             st.write("**Rewrite result:**")
             st.info(result)
+
+# Show Ollama availability status in the main UI
+cli_path, model_found, model_msg = check_ollama_status(OLLAMA_CLI, OLLAMA_MODEL)
+if cli_path and model_found:
+    st.success(f"✓ Ollama CLI found: {cli_path}\n✓ Model '{OLLAMA_MODEL}' available")
+elif cli_path and not model_found:
+    st.warning(f"✓ Ollama CLI found: {cli_path}\n⚠ Model '{OLLAMA_MODEL}' NOT found ({model_msg})")
+else:
+    paths_checked = "\n".join(f"- {p}" for p in [
+        str(Path.home() / '.ollama' / 'ollama.exe'),
+        str(Path.home() / '.ollama' / 'bin' / 'ollama.exe'),
+        str(Path.home() / 'AppData' / 'Local' / 'Programs' / 'Ollama' / 'ollama.exe'),
+        r"C:\Program Files\Ollama\ollama.exe",
+        r"C:\Program Files (x86)\Ollama\ollama.exe",
+    ])
+    st.info(f"""
+⚠ Ollama CLI not found in common locations:
+{paths_checked}
+
+Quick fix:
+1. Set this in cmd.exe, then run streamlit:
+   set OLLAMA_CLI=C:\\Users\\brand\\AppData\\Local\\Programs\\Ollama\\ollama.exe
+
+2. Or paste the path in the sidebar 'Ollama CLI path' field:
+   C:\\Users\\brand\\AppData\\Local\\Programs\\Ollama\\ollama.exe
+""")
 
 uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
